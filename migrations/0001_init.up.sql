@@ -4,6 +4,7 @@ CREATE TABLE objects (
 	type text[] NOT NULL,
 	properties jsonb NOT NULL DEFAULT '{}',
 	children jsonb[],
+	deleted boolean NOT NULL DEFAULT False,
 	tsv tsvector
 );
 
@@ -135,3 +136,33 @@ BEGIN
 	RETURN QUERY SELECT _objects_normalize_temp.data FROM _objects_normalize_temp UNION VALUES (result);
 END
 $$ LANGUAGE plpgsql;
+
+CREATE FUNCTION jsonb_array_to_pg_array(data jsonb) RETURNS jsonb[] AS $$
+	SELECT CASE data
+	WHEN NULL THEN NULL
+	WHEN 'null'::jsonb THEN NULL
+	ELSE (SELECT array_agg(x)::jsonb[] FROM jsonb_array_elements(data) AS x)
+	END;
+$$ LANGUAGE sql;
+
+CREATE FUNCTION jsonb_array_to_pg_array_of_text(data jsonb) RETURNS text[] AS $$
+	SELECT CASE data
+	WHEN NULL THEN NULL
+	WHEN 'null'::jsonb THEN NULL
+	ELSE (SELECT array_agg(x) FROM jsonb_array_elements_text(data) AS x)
+	END;
+$$ LANGUAGE sql;
+
+CREATE FUNCTION objects_normalized_upsert(data jsonb) RETURNS void AS $$
+	INSERT INTO objects (type, properties, children)
+	SELECT
+		-- distinct because upsert (ON CONFLICT UPDATE) doesn't support affecting one row twice
+		DISTINCT ON ((objects_normalize->'properties'->'url'->>0))
+		(SELECT jsonb_array_to_pg_array_of_text(objects_normalize->'type')),
+		objects_normalize->'properties',
+		(SELECT jsonb_array_to_pg_array(objects_normalize->'children'))
+	FROM objects_normalize(data)
+	WHERE (objects_normalize->'properties'->'url'->>0) IS NOT NULL
+	ON CONFLICT ((properties->'url'->>0))
+	DO UPDATE SET type = EXCLUDED.type, properties = EXCLUDED.properties, children = EXCLUDED.children;
+$$ LANGUAGE sql;

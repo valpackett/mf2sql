@@ -26,22 +26,7 @@ end
 json_enc = PG::TextEncoder::JSON.new
 
 db.transaction do |tx|
-  stmt = tx.prepare('import', <<SQL)
-INSERT INTO objects (type, properties, children)
-SELECT
-  DISTINCT ON ((objects_normalize->'properties'->'url'->>0))
-  (SELECT array_agg(x) FROM jsonb_array_elements_text(objects_normalize->'type') AS x) AS typee,
-  objects_normalize->'properties',
-  CASE objects_normalize->'children'
-  WHEN NULL THEN NULL
-  WHEN 'null'::jsonb THEN NULL
-  ELSE (SELECT array_agg(x)::jsonb[] FROM jsonb_array_elements(objects_normalize->'children') AS x)
-  END
-FROM objects_normalize($1::jsonb)
-WHERE (objects_normalize->'properties'->'url'->>0) IS NOT NULL
-ON CONFLICT ((properties->'url'->>0))
-DO UPDATE SET type = EXCLUDED.type, properties = EXCLUDED.properties, children = EXCLUDED.children;
-SQL
+  stmt = tx.prepare('import', 'SELECT objects_normalized_upsert($1);')
   ARGV.each do |arg|
     data = parse(File.read(arg))
     tx.exec_prepared('import', [json_enc.encode(data)])
