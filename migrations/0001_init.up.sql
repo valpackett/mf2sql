@@ -89,7 +89,7 @@ BEGIN
 	WHEN 'object' THEN RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value ELSE objects_denormalize(value) END) FROM jsonb_each(data));
 	WHEN 'array'  THEN RETURN (SELECT jsonb_agg(objects_denormalize(value)) FROM jsonb_array_elements(data));
 	WHEN 'string' THEN
-		SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties))
+		SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties), 'children', objects_denormalize(children))
 		INTO result
 		FROM objects
 		WHERE properties->'url'->0 = data;

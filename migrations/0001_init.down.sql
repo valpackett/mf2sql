@@ -1,3 +1,6 @@
+DROP FUNCTION objects_normalized_upsert(jsonb) CASCADE;
+DROP FUNCTION jsonb_array_to_pg_array(jsonb) CASCADE;
+DROP FUNCTION jsonb_array_to_pg_array_of_text(jsonb) CASCADE;
 DROP FUNCTION objects_normalize(jsonb) CASCADE;
 DROP FUNCTION _objects_normalize_inner(jsonb) CASCADE;
 DROP FUNCTION objects_denormalize(jsonb) CASCADE;
