@@ -9,4 +9,5 @@ DROP FUNCTION objects_search(text) CASCADE;
 DROP FUNCTION objects_set_tsv() CASCADE;
 DROP FUNCTION tsv_from_jsonb(jsonb) CASCADE;
 DROP FUNCTION flatten_jsonb(jsonb) CASCADE;
+DROP FUNCTION cast_timestamp(data text) CASCADE;
 DROP TABLE objects CASCADE;

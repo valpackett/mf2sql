@@ -8,7 +8,15 @@ CREATE TABLE objects (
 	tsv tsvector
 );
 
+CREATE FUNCTION cast_timestamp(data text) RETURNS timestamptz AS $$
+BEGIN
+	RETURN data::timestamp;
+EXCEPTION WHEN others THEN RETURN NULL;
+END
+$$ LANGUAGE plpgsql IMMUTABLE;
+
 CREATE UNIQUE INDEX url_idx ON objects ((properties->'url'->>0));
+CREATE INDEX pub_time_idx ON objects (cast_timestamp(properties->'published'->>0));
 CREATE INDEX properties_idx ON objects USING GIN(properties jsonb_path_ops);
 
 
@@ -29,13 +37,13 @@ CREATE FUNCTION flatten_jsonb(data jsonb) RETURNS SETOF jsonb AS $$
 		FROM deconstruct
 		WHERE jsonb_typeof(jsonlevel) IN ('object', 'array')
 	) SELECT * FROM deconstruct;
-$$ LANGUAGE sql;
+$$ LANGUAGE sql IMMUTABLE;
 
 CREATE FUNCTION tsv_from_jsonb(data jsonb) RETURNS tsvector AS $$
 	SELECT to_tsvector(coalesce(string_agg(flat::text, ' '), ''))
 	FROM flatten_jsonb(data) flat
 	WHERE jsonb_typeof(flat) = 'string';
-$$ LANGUAGE sql;
+$$ LANGUAGE sql IMMUTABLE;
 
 CREATE FUNCTION objects_set_tsv() RETURNS trigger AS $$
 BEGIN
@@ -143,7 +151,7 @@ CREATE FUNCTION jsonb_array_to_pg_array(data jsonb) RETURNS jsonb[] AS $$
 	WHEN 'null'::jsonb THEN NULL
 	ELSE (SELECT array_agg(x)::jsonb[] FROM jsonb_array_elements(data) AS x)
 	END;
-$$ LANGUAGE sql;
+$$ LANGUAGE sql IMMUTABLE;
 
 CREATE FUNCTION jsonb_array_to_pg_array_of_text(data jsonb) RETURNS text[] AS $$
 	SELECT CASE data
@@ -151,7 +159,7 @@ CREATE FUNCTION jsonb_array_to_pg_array_of_text(data jsonb) RETURNS text[] AS $$
 	WHEN 'null'::jsonb THEN NULL
 	ELSE (SELECT array_agg(x) FROM jsonb_array_elements_text(data) AS x)
 	END;
-$$ LANGUAGE sql;
+$$ LANGUAGE sql IMMUTABLE;
 
 CREATE FUNCTION objects_normalized_upsert(data jsonb) RETURNS void AS $$
 	INSERT INTO objects (type, properties, children)
