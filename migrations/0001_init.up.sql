@@ -89,23 +89,62 @@ FOR EACH ROW EXECUTE PROCEDURE objects_notify();
 
 
 -------------------------------------------------------------------------------------------- Denormalization
-CREATE FUNCTION objects_denormalize(data jsonb) RETURNS jsonb AS $$
+CREATE FUNCTION _objects_denormalize_inner(data jsonb, lvl int) RETURNS jsonb AS $$
 DECLARE
 	result jsonb;
 BEGIN
+	IF lvl >= 20 THEN
+		RETURN data;
+	END IF;
 	CASE jsonb_typeof(data)
-	WHEN 'object' THEN RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value ELSE objects_denormalize(value) END) FROM jsonb_each(data));
-	WHEN 'array'  THEN RETURN (SELECT jsonb_agg(objects_denormalize(value)) FROM jsonb_array_elements(data));
 	WHEN 'string' THEN
-		SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties), 'children', objects_denormalize(children))
+		IF NOT (data::text LIKE '"http%') OR EXISTS (SELECT 1 FROM _objects_denormalize_temp WHERE url = trim(both from data::text, '"')) THEN
+			RETURN data;
+		END IF;
+		INSERT INTO _objects_denormalize_temp VALUES (data::text);
+		SELECT jsonb_build_object('type', type, 'properties', _objects_denormalize_inner(properties, lvl + 1), 'children', _objects_denormalize_inner(to_jsonb(children), lvl + 1))
 		INTO result
 		FROM objects
 		WHERE properties->'url'->0 = data;
 		IF FOUND THEN
 			RETURN result;
-		ELSE
-			RETURN data;
 		END IF;
+		RETURN data;
+	WHEN 'object' THEN
+		INSERT INTO _objects_denormalize_temp
+		SELECT jsonb_array_elements_text(data->'url')
+		UNION ALL SELECT jsonb_array_elements_text(data->'uid');
+		RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value WHEN 'uid' THEN value ELSE _objects_denormalize_inner(value, lvl + 1) END) FROM jsonb_each(data));
+	WHEN 'array' THEN
+		RETURN (SELECT jsonb_agg(_objects_denormalize_inner(value, lvl + 1)) FROM jsonb_array_elements(data));
+	ELSE
+		RETURN data;
+	END CASE;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION objects_denormalize(data jsonb) RETURNS jsonb AS $$
+	DROP TABLE IF EXISTS _objects_denormalize_temp;
+	CREATE TEMPORARY TABLE _objects_denormalize_temp (url text) ON COMMIT DROP;
+	SELECT _objects_denormalize_inner(data, 0);
+$$ LANGUAGE sql;
+
+CREATE FUNCTION objects_denormalize_unlimited(data jsonb) RETURNS jsonb AS $$
+DECLARE
+	result jsonb;
+BEGIN
+	CASE jsonb_typeof(data)
+	WHEN 'string' THEN
+		SELECT jsonb_build_object('type', type, 'properties', objects_denormalize_unlimited(properties), 'children', objects_denormalize_unlimited(to_jsonb(children)))
+		INTO result
+		FROM objects
+		WHERE properties->'url'->0 = data;
+		IF FOUND THEN
+			RETURN result;
+		END IF;
+		RETURN data;
+	WHEN 'object' THEN RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value WHEN 'uid' THEN value ELSE objects_denormalize_unlimited(value) END) FROM jsonb_each(data));
+	WHEN 'array'  THEN RETURN (SELECT jsonb_agg(objects_denormalize_unlimited(value)) FROM jsonb_array_elements(data));
 	ELSE RETURN data;
 	END CASE;
 END
@@ -125,9 +164,8 @@ BEGIN
 				'children', _objects_normalize_inner(data->'children')
 			);
 			RETURN data->'properties'->'url'->0;
-		ELSE
-			RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value ELSE _objects_normalize_inner(value) END) FROM jsonb_each(data));
 		END IF;
+		RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value WHEN 'uid' THEN value ELSE _objects_normalize_inner(value) END) FROM jsonb_each(data));
 	WHEN 'array' THEN RETURN (SELECT jsonb_agg(_objects_normalize_inner(value)) FROM jsonb_array_elements(data));
 	ELSE RETURN data;
 	END CASE;
@@ -139,7 +177,7 @@ DECLARE
 	result jsonb;
 BEGIN
 	DROP TABLE IF EXISTS _objects_normalize_temp;
-	CREATE TEMPORARY TABLE _objects_normalize_temp (data jsonb NOT NULL) ON COMMIT DROP;
+	CREATE TEMPORARY TABLE _objects_normalize_temp (data jsonb) ON COMMIT DROP;
 	SELECT _objects_normalize_inner(data) INTO result;
 	RETURN QUERY SELECT _objects_normalize_temp.data FROM _objects_normalize_temp UNION VALUES (result);
 END
@@ -174,3 +212,35 @@ CREATE FUNCTION objects_normalized_upsert(data jsonb) RETURNS void AS $$
 	ON CONFLICT ((properties->'url'->>0))
 	DO UPDATE SET type = EXCLUDED.type, properties = EXCLUDED.properties, children = EXCLUDED.children;
 $$ LANGUAGE sql;
+
+
+-------------------------------------------------------------------------------------------- Smart Fetch
+CREATE FUNCTION objects_smart_fetch(uri text, lim int, before timestamptz, after timestamptz) RETURNS jsonb AS $$
+DECLARE
+	result jsonb;
+	items jsonb;
+BEGIN
+	SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'deleted', deleted)
+	FROM objects INTO result
+	WHERE trim(both from properties->'url'->>0, '"') = uri;
+	CASE
+	WHEN result->'type' @> '"h-x-dynamic-feed"' THEN
+		SELECT json_agg(obj) FROM (
+			SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'deleted', deleted) AS obj
+			FROM objects
+			WHERE properties @> ANY(jsonb_array_to_pg_array(result->'properties'->'filter'))
+			AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
+			AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
+			ORDER BY cast_timestamp(properties->'published'->>0) DESC
+			LIMIT lim
+		) subq INTO items;
+		SELECT jsonb_set(jsonb_set(result, '{children}', items), '{type}', '["h-feed"]') INTO result;
+		RETURN result;
+	ELSE
+		SELECT jsonb_set(
+			jsonb_set(result, '{properties}', objects_denormalize(result->'properties')),
+			'{children}', objects_denormalize(result->'children')) INTO result;
+		RETURN result;
+	END CASE;
+END
+$$ LANGUAGE plpgsql;

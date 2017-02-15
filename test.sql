@@ -1,5 +1,5 @@
 -- pgTAP test, run with pg_prove
-BEGIN; SELECT plan(13);
+BEGIN; SELECT plan(14);
 
 SELECT has_table('objects');
 SELECT col_type_is('objects', 'type', 'text[]');
@@ -47,7 +47,7 @@ INSERT INTO objects VALUES ('{"h-entry"}', '{"url": ["http://2"], "name": ["Test
 INSERT INTO objects VALUES ('{"h-entry"}', '{"url": ["http://3"], "name": ["Test 3"], "comments": ["http://2"]}');
 
 SELECT results_eq($$
-	SELECT objects_denormalize(properties) FROM objects WHERE properties->'url'->>0 = 'http://3';
+	SELECT objects_denormalize_unlimited(properties) FROM objects WHERE properties->'url'->>0 = 'http://3';
 $$, $$
 	SELECT '{
 	"url": ["http://3"],
@@ -55,16 +55,19 @@ $$, $$
 	"comments": [
 		{
 			"type": ["h-entry"],
+			"children": null,
 			"properties": {
 				"url": ["http://2"],
 				"name": ["Test 2"],
 				"comments": [
 					{
 						"type": ["h-entry"],
+						"children": null,
 						"properties": {"url": ["http://1"], "name": ["Test 1"]}
 					},
 					{"comment": {
 						"type": ["h-entry"],
+						"children": null,
 						"properties": {"url": ["http://1"], "name": ["Test 1"]}
 					}}
 				]
@@ -74,6 +77,33 @@ $$, $$
 }'::jsonb;
 $$);
 
+
+SELECT results_eq($$
+	SELECT objects_denormalize(properties) FROM objects WHERE properties->'url'->>0 = 'http://3';
+$$, $$
+	SELECT '{
+	"url": ["http://3"],
+	"name": ["Test 3"],
+	"comments": [
+		{
+			"type": ["h-entry"],
+			"children": null,
+			"properties": {
+				"url": ["http://2"],
+				"name": ["Test 2"],
+				"comments": [
+					{
+						"type": ["h-entry"],
+						"children": null,
+						"properties": {"url": ["http://1"], "name": ["Test 1"]}
+					},
+					{"comment": "http://1"}
+				]
+			}
+		}
+	]
+}'::jsonb;
+$$);
 
 -------------------------------------------------------------------------------------------- Normalization
 SELECT results_eq($$
