@@ -6,6 +6,7 @@ DROP FUNCTION jsonb_array_to_pg_array_of_text(jsonb) CASCADE;
 DROP FUNCTION objects_normalize(jsonb) CASCADE;
 DROP FUNCTION _objects_normalize_inner(jsonb) CASCADE;
 DROP FUNCTION objects_denormalize(jsonb) CASCADE;
+DROP FUNCTION objects_denormalize(jsonb, int) CASCADE;
 DROP FUNCTION _objects_denormalize_inner(jsonb, int) CASCADE;
 DROP FUNCTION objects_denormalize_unlimited(jsonb) CASCADE;
 DROP FUNCTION objects_notify() CASCADE;

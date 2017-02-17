@@ -98,7 +98,7 @@ CREATE FUNCTION _objects_denormalize_inner(data jsonb, lvl int) RETURNS jsonb AS
 DECLARE
 	result jsonb;
 BEGIN
-	IF lvl >= 32 THEN
+	IF lvl <= 0 THEN
 		RETURN data;
 	END IF;
 	CASE jsonb_typeof(data)
@@ -143,16 +143,22 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
-CREATE FUNCTION objects_denormalize(data jsonb) RETURNS jsonb AS $$
+CREATE FUNCTION objects_denormalize(data jsonb, lvl int) RETURNS jsonb AS $$
 BEGIN
 	IF (SELECT to_regclass('_objects_denormalize_temp')) IS NULL THEN
 		CREATE TEMPORARY TABLE _objects_denormalize_temp (url text);
 	ELSE
 		TRUNCATE TABLE _objects_denormalize_temp;
 	END IF;
-	RETURN (SELECT _objects_denormalize_inner(data, 0));
+	RETURN (SELECT _objects_denormalize_inner(data, lvl));
 END
 $$ LANGUAGE plpgsql;
+
+SET mf2sql.denormalize_default_depth_limit = 32;
+
+CREATE FUNCTION objects_denormalize(data jsonb) RETURNS jsonb AS $$
+	SELECT objects_denormalize(data, coalesce(current_setting('mf2sql.denormalize_default_depth_limit', true)::int, 32));
+$$ LANGUAGE sql;
 
 CREATE FUNCTION objects_denormalize_unlimited(data jsonb) RETURNS jsonb AS $$
 DECLARE
@@ -277,7 +283,7 @@ BEGIN
 	CASE
 	WHEN result->'type' @> '"h-x-dynamic-feed"' THEN
 		SELECT json_agg(obj) FROM (
-			SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'deleted', deleted) AS obj
+			SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'deleted', deleted) AS obj
 			FROM objects
 			WHERE properties @> ANY(jsonb_array_to_pg_array(substitute_params(result->'properties'->'filter', params)))
 			AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
