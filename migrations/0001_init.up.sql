@@ -98,14 +98,14 @@ BEGIN
 	END IF;
 	CASE jsonb_typeof(data)
 	WHEN 'string' THEN
-		IF NOT (data::text LIKE '"http%') OR EXISTS (SELECT 1 FROM _objects_denormalize_temp WHERE url = trim(both from data::text, '"')) THEN
+		IF EXISTS (SELECT 1 FROM _objects_denormalize_temp WHERE url = trim(both from data::text, '"')) THEN
 			RETURN data;
 		END IF;
 		INSERT INTO _objects_denormalize_temp VALUES (data::text);
 		SELECT jsonb_build_object('type', type, 'properties', _objects_denormalize_inner(properties, lvl + 1), 'children', _objects_denormalize_inner(to_jsonb(children), lvl + 1))
 		INTO result
 		FROM objects
-		WHERE properties->'url'->0 = data;
+		WHERE properties->'url'->>0 = trim(both from data::text, '"');
 		IF FOUND THEN
 			RETURN result;
 		END IF;
@@ -114,9 +114,24 @@ BEGIN
 		INSERT INTO _objects_denormalize_temp
 		SELECT jsonb_array_elements_text(data->'url')
 		UNION ALL SELECT jsonb_array_elements_text(data->'uid');
-		RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value WHEN 'uid' THEN value ELSE _objects_denormalize_inner(value, lvl + 1) END) FROM jsonb_each(data));
+		RETURN (
+			SELECT
+				jsonb_object_agg(key, CASE
+					WHEN key = 'url' OR key = 'uid' THEN value
+					WHEN (jsonb_typeof(value) = 'string' AND NOT value::text LIKE '"http%') THEN value
+					ELSE _objects_denormalize_inner(value, lvl + 1)
+				END)
+			FROM jsonb_each(data)
+		);
 	WHEN 'array' THEN
-		RETURN (SELECT jsonb_agg(_objects_denormalize_inner(value, lvl + 1)) FROM jsonb_array_elements(data));
+		RETURN (
+			SELECT
+				jsonb_agg(CASE
+					WHEN jsonb_typeof(value) = 'string' AND NOT value::text LIKE '"http%' THEN value
+					ELSE _objects_denormalize_inner(value, lvl + 1)
+				END)
+			FROM jsonb_array_elements(data)
+		);
 	ELSE
 		RETURN data;
 	END CASE;
@@ -138,13 +153,20 @@ BEGIN
 		SELECT jsonb_build_object('type', type, 'properties', objects_denormalize_unlimited(properties), 'children', objects_denormalize_unlimited(to_jsonb(children)))
 		INTO result
 		FROM objects
-		WHERE properties->'url'->0 = data;
+		WHERE properties->'url'->>0 = trim(both from data::text, '"');
 		IF FOUND THEN
 			RETURN result;
 		END IF;
 		RETURN data;
-	WHEN 'object' THEN RETURN (SELECT jsonb_object_agg(key, CASE key WHEN 'url' THEN value WHEN 'uid' THEN value ELSE objects_denormalize_unlimited(value) END) FROM jsonb_each(data));
-	WHEN 'array'  THEN RETURN (SELECT jsonb_agg(objects_denormalize_unlimited(value)) FROM jsonb_array_elements(data));
+	WHEN 'object' THEN RETURN (
+		SELECT
+			jsonb_object_agg(key, CASE
+				WHEN key = 'url' OR key = 'uid' THEN value
+				ELSE objects_denormalize_unlimited(value)
+			END)
+		FROM jsonb_each(data)
+	);
+	WHEN 'array' THEN RETURN (SELECT jsonb_agg(objects_denormalize_unlimited(value)) FROM jsonb_array_elements(data));
 	ELSE RETURN data;
 	END CASE;
 END
