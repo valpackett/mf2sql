@@ -1,4 +1,5 @@
-DROP FUNCTION objects_smart_fetch(text, int, timestamptz, timestamptz) CASCADE;
+DROP FUNCTION objects_smart_fetch(text, int, timestamptz, timestamptz, jsonb) CASCADE;
+DROP FUNCTION substitute_params(jsonb, jsonb) CASCADE;
 DROP FUNCTION objects_normalized_upsert(jsonb) CASCADE;
 DROP FUNCTION jsonb_array_to_pg_array(jsonb) CASCADE;
 DROP FUNCTION jsonb_array_to_pg_array_of_text(jsonb) CASCADE;

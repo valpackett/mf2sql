@@ -89,11 +89,16 @@ FOR EACH ROW EXECUTE PROCEDURE objects_notify();
 
 
 -------------------------------------------------------------------------------------------- Denormalization
+-- NOTE: don't bother trying to optimize the performance here, this function cannot be super instant.
+-- The time is taken by literally just looking up the URLs. There's just, like, many of them.
+-- Recursion in PL/pgSQL and the temporary table are *not slow*!
+-- I've tried making a PLV8 implementation (with the tree walk and visited set inside of JS), it was actually a bit slower.
+-- It's a bit faster without storing visited URLs, but we need it to prevent infinite recursion.
 CREATE FUNCTION _objects_denormalize_inner(data jsonb, lvl int) RETURNS jsonb AS $$
 DECLARE
 	result jsonb;
 BEGIN
-	IF lvl >= 20 THEN
+	IF lvl >= 32 THEN
 		RETURN data;
 	END IF;
 	CASE jsonb_typeof(data)
@@ -139,10 +144,15 @@ END
 $$ LANGUAGE plpgsql;
 
 CREATE FUNCTION objects_denormalize(data jsonb) RETURNS jsonb AS $$
-	DROP TABLE IF EXISTS _objects_denormalize_temp;
-	CREATE TEMPORARY TABLE _objects_denormalize_temp (url text) ON COMMIT DROP;
-	SELECT _objects_denormalize_inner(data, 0);
-$$ LANGUAGE sql;
+BEGIN
+	IF (SELECT to_regclass('_objects_denormalize_temp')) IS NULL THEN
+		CREATE TEMPORARY TABLE _objects_denormalize_temp (url text);
+	ELSE
+		TRUNCATE TABLE _objects_denormalize_temp;
+	END IF;
+	RETURN (SELECT _objects_denormalize_inner(data, 0));
+END
+$$ LANGUAGE plpgsql;
 
 CREATE FUNCTION objects_denormalize_unlimited(data jsonb) RETURNS jsonb AS $$
 DECLARE
@@ -237,7 +247,26 @@ $$ LANGUAGE sql;
 
 
 -------------------------------------------------------------------------------------------- Smart Fetch
-CREATE FUNCTION objects_smart_fetch(uri text, lim int, before timestamptz, after timestamptz) RETURNS jsonb AS $$
+CREATE FUNCTION substitute_params(data jsonb, params jsonb) RETURNS jsonb AS $$
+DECLARE
+	temp text;
+BEGIN
+	CASE jsonb_typeof(data)
+	WHEN 'string' THEN
+		SELECT params->trim(both from trim(both from data::text, '"'), '{}') INTO temp;
+		IF temp IS NULL THEN
+			RETURN data;
+		ELSE
+			RETURN temp;
+		END IF;
+	WHEN 'object' THEN RETURN (SELECT jsonb_object_agg(key, substitute_params(value, params)) FROM jsonb_each(data));
+	WHEN 'array'  THEN RETURN (SELECT jsonb_agg(substitute_params(value, params)) FROM jsonb_array_elements(data));
+	ELSE RETURN data;
+	END CASE;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION objects_smart_fetch(uri text, lim int, before timestamptz, after timestamptz, params jsonb) RETURNS jsonb AS $$
 DECLARE
 	result jsonb;
 	items jsonb;
@@ -250,13 +279,13 @@ BEGIN
 		SELECT json_agg(obj) FROM (
 			SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'deleted', deleted) AS obj
 			FROM objects
-			WHERE properties @> ANY(jsonb_array_to_pg_array(result->'properties'->'filter'))
+			WHERE properties @> ANY(jsonb_array_to_pg_array(substitute_params(result->'properties'->'filter', params)))
 			AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
 			AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
 			ORDER BY cast_timestamp(properties->'published'->>0) DESC
 			LIMIT lim
 		) subq INTO items;
-		SELECT jsonb_set(jsonb_set(result, '{children}', items), '{type}', '["h-feed"]') INTO result;
+		SELECT jsonb_set(jsonb_set(result, '{children}', coalesce(items, '[]')), '{type}', '["h-feed"]') INTO result;
 		RETURN result;
 	ELSE
 		SELECT jsonb_set(
