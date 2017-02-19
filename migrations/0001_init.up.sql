@@ -147,6 +147,7 @@ CREATE FUNCTION objects_denormalize(data jsonb, lvl int) RETURNS jsonb AS $$
 BEGIN
 	IF (SELECT to_regclass('_objects_denormalize_temp')) IS NULL THEN
 		CREATE TEMPORARY TABLE _objects_denormalize_temp (url text);
+		CREATE INDEX ON _objects_denormalize_temp (url);
 	ELSE
 		TRUNCATE TABLE _objects_denormalize_temp;
 	END IF;
@@ -214,8 +215,11 @@ CREATE FUNCTION objects_normalize(data jsonb) RETURNS SETOF jsonb AS $$
 DECLARE
 	result jsonb;
 BEGIN
-	DROP TABLE IF EXISTS _objects_normalize_temp;
-	CREATE TEMPORARY TABLE _objects_normalize_temp (data jsonb) ON COMMIT DROP;
+	IF (SELECT to_regclass('_objects_normalize_temp')) IS NULL THEN
+		CREATE TEMPORARY TABLE _objects_normalize_temp (data jsonb);
+	ELSE
+		TRUNCATE TABLE _objects_normalize_temp;
+	END IF;
 	SELECT _objects_normalize_inner(data) INTO result;
 	RETURN QUERY SELECT _objects_normalize_temp.data FROM _objects_normalize_temp UNION VALUES (result);
 END
@@ -270,10 +274,11 @@ BEGIN
 	ELSE RETURN data;
 	END CASE;
 END
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql IMMUTABLE;
 
-CREATE FUNCTION objects_smart_fetch(uri text, lim int, before timestamptz, after timestamptz, params jsonb) RETURNS jsonb AS $$
+CREATE FUNCTION objects_smart_fetch(uri text, uri_prefix text, lim int, before timestamptz, after timestamptz, params jsonb) RETURNS jsonb AS $$
 DECLARE
+	filter jsonb[];
 	result jsonb;
 	items jsonb;
 BEGIN
@@ -282,15 +287,32 @@ BEGIN
 	WHERE trim(both from properties->'url'->>0, '"') = uri;
 	CASE
 	WHEN result->'type' @> '"h-x-dynamic-feed"' THEN
-		SELECT json_agg(obj) FROM (
-			SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'deleted', deleted) AS obj
-			FROM objects
-			WHERE properties @> ANY(jsonb_array_to_pg_array(substitute_params(result->'properties'->'filter', params)))
-			AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
-			AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
-			ORDER BY cast_timestamp(properties->'published'->>0) DESC
-			LIMIT lim
-		) subq INTO items;
+		-- NOTE: putting the filter code inside of the ANY() causes the planner to use seq scan, but only if it has substitute_params
+		SELECT jsonb_array_to_pg_array(substitute_params(result->'properties'->'filter', params)) INTO filter;
+		IF before IS NULL AND after IS NOT NULL THEN
+			SELECT json_agg(obj) FROM (
+				SELECT obj FROM (
+					SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'deleted', deleted) AS obj
+					FROM objects
+					WHERE properties @> ANY(filter)
+					AND (properties->'url'->>0)::text LIKE uri_prefix
+					AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
+					ORDER BY cast_timestamp(properties->'published'->>0) ASC
+					LIMIT lim
+				) subsubq ORDER BY cast_timestamp(obj->'properties'->'published'->>0) DESC
+			) subq INTO items;
+		ELSE
+			SELECT json_agg(obj) FROM (
+				SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'deleted', deleted) AS obj
+				FROM objects
+				WHERE properties @> ANY(filter)
+				AND (properties->'url'->>0)::text LIKE uri_prefix
+				AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
+				AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
+				ORDER BY cast_timestamp(properties->'published'->>0) DESC
+				LIMIT lim
+			) subq INTO items;
+		END IF;
 		SELECT jsonb_set(jsonb_set(result, '{children}', coalesce(items, '[]')), '{type}', '["h-feed"]') INTO result;
 		RETURN result;
 	ELSE
