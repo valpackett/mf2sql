@@ -4,10 +4,13 @@ CREATE TABLE objects (
 	type text[] NOT NULL,
 	properties jsonb NOT NULL DEFAULT '{}',
 	children jsonb[],
+	acl text[] NOT NULL DEFAULT '{*}',
 	deleted boolean NOT NULL DEFAULT False,
 	tsv tsvector
 );
 
+-- The function exists because index functions need to be IMMUTABLE.
+-- Technically, this hack is bad because casting to timestamps actually depends on current settings, but you're not gonna change them, are you?
 CREATE FUNCTION cast_timestamp(data text) RETURNS timestamptz AS $$
 BEGIN
 	RETURN data::timestamp;
@@ -60,13 +63,6 @@ CREATE TRIGGER objects_set_tsv_trigger
 BEFORE INSERT OR UPDATE ON objects
 FOR EACH ROW EXECUTE PROCEDURE objects_set_tsv();
 
-CREATE FUNCTION objects_search(query text) RETURNS TABLE(type text[], properties jsonb, rank float4) AS $$
-	SELECT type, properties, ts_rank_cd(tsv, querytsv) AS rank
-	FROM objects, to_tsquery(query) querytsv
-	WHERE querytsv @@ tsv
-	ORDER BY rank DESC;
-$$ LANGUAGE sql;
-
 
 -------------------------------------------------------------------------------------------- Notifications
 CREATE FUNCTION objects_notify() RETURNS trigger AS $$
@@ -107,7 +103,7 @@ BEGIN
 			RETURN data;
 		END IF;
 		INSERT INTO _objects_denormalize_temp VALUES (data::text);
-		SELECT jsonb_build_object('type', type, 'properties', _objects_denormalize_inner(properties, lvl + 1), 'children', _objects_denormalize_inner(to_jsonb(children), lvl + 1))
+		SELECT jsonb_build_object('type', type, 'properties', _objects_denormalize_inner(properties, lvl + 1), 'children', _objects_denormalize_inner(to_jsonb(children), lvl + 1), 'acl', acl, 'deleted', deleted)
 		INTO result
 		FROM objects
 		WHERE properties->'url'->>0 = trim(both from data::text, '"');
@@ -155,11 +151,12 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
-SET mf2sql.denormalize_default_depth_limit = 32;
-
 CREATE FUNCTION objects_denormalize(data jsonb) RETURNS jsonb AS $$
-	SELECT objects_denormalize(data, coalesce(current_setting('mf2sql.denormalize_default_depth_limit', true)::int, 32));
+	SELECT objects_denormalize(data, coalesce(current_setting('mf2sql.denormalize_default_depth_limit', true)::int, 64));
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION objects_denormalize(data jsonb) IS $$
+	Recursively embeds other objects referenced by URL, embedding each object only once and stopping recursion after a depth limit, determined by the mf2sql.denormalize_default_depth_limit setting.
+$$;
 
 CREATE FUNCTION objects_denormalize_unlimited(data jsonb) RETURNS jsonb AS $$
 DECLARE
@@ -167,7 +164,7 @@ DECLARE
 BEGIN
 	CASE jsonb_typeof(data)
 	WHEN 'string' THEN
-		SELECT jsonb_build_object('type', type, 'properties', objects_denormalize_unlimited(properties), 'children', objects_denormalize_unlimited(to_jsonb(children)))
+		SELECT jsonb_build_object('type', type, 'properties', objects_denormalize_unlimited(properties), 'children', objects_denormalize_unlimited(to_jsonb(children)), 'acl', acl, 'deleted', deleted)
 		INTO result
 		FROM objects
 		WHERE properties->'url'->>0 = trim(both from data::text, '"');
@@ -188,7 +185,11 @@ BEGIN
 	END CASE;
 END
 $$ LANGUAGE plpgsql;
-
+COMMENT ON FUNCTION objects_denormalize_unlimited(data jsonb) IS $$
+	Recursively embeds other objects referenced by URL.
+	Will loop infinitely on circular references, so not use.
+	Use the not-_unlimited variant instead.
+$$;
 
 -------------------------------------------------------------------------------------------- Normalization
 CREATE FUNCTION _objects_normalize_inner(data jsonb) RETURNS jsonb AS $$
@@ -200,7 +201,9 @@ BEGIN
 			SELECT jsonb_build_object(
 				'type', data->'type',
 				'properties', _objects_normalize_inner(data->'properties'),
-				'children', _objects_normalize_inner(data->'children')
+				'children', _objects_normalize_inner(data->'children'),
+				'acl', data->'acl',
+				'deleted', data->'deleted'
 			);
 			RETURN data->'properties'->'url'->0;
 		END IF;
@@ -224,6 +227,9 @@ BEGIN
 	RETURN QUERY SELECT _objects_normalize_temp.data FROM _objects_normalize_temp UNION VALUES (result);
 END
 $$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION objects_normalize(data jsonb) IS $$
+	Recursively un-embeds embedded objects, flattening the hierarchy.
+$$;
 
 CREATE FUNCTION jsonb_array_to_pg_array(data jsonb) RETURNS jsonb[] AS $$
 	SELECT CASE data
@@ -254,9 +260,12 @@ CREATE FUNCTION objects_normalized_upsert(data jsonb) RETURNS void AS $$
 	ON CONFLICT ((properties->'url'->>0))
 	DO UPDATE SET type = EXCLUDED.type, properties = EXCLUDED.properties, children = EXCLUDED.children;
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION objects_normalized_upsert(data jsonb) IS $$
+	Upserts and object and its embedded objects after flattening the hierarchy.
+$$;
 
 
--------------------------------------------------------------------------------------------- Smart Fetch
+-------------------------------------------------------------------------------------------- Fetching
 CREATE FUNCTION substitute_params(data jsonb, params jsonb) RETURNS jsonb AS $$
 DECLARE
 	temp text;
@@ -279,23 +288,27 @@ $$ LANGUAGE plpgsql IMMUTABLE;
 CREATE FUNCTION objects_smart_fetch(uri text, uri_prefix text, lim int, before timestamptz, after timestamptz, params jsonb) RETURNS jsonb AS $$
 DECLARE
 	filter jsonb[];
+	unfilter jsonb[];
 	result jsonb;
 	items jsonb;
 BEGIN
-	SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'deleted', deleted)
+	SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'acl', acl, 'deleted', deleted)
 	FROM objects INTO result
 	WHERE trim(both from properties->'url'->>0, '"') = uri;
 	CASE
 	WHEN result->'type' @> '"h-x-dynamic-feed"' THEN
 		-- NOTE: putting the filter code inside of the ANY() causes the planner to use seq scan, but only if it has substitute_params
 		SELECT jsonb_array_to_pg_array(substitute_params(result->'properties'->'filter', params)) INTO filter;
+		SELECT jsonb_array_to_pg_array(substitute_params(result->'properties'->'unfilter', params)) INTO unfilter;
 		IF before IS NULL AND after IS NOT NULL THEN
 			SELECT json_agg(obj) FROM (
 				SELECT obj FROM (
-					SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'deleted', deleted) AS obj
+					SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'acl', acl, 'deleted', deleted) AS obj
 					FROM objects
-					WHERE properties @> ANY(filter)
-					AND (properties->'url'->>0)::text LIKE uri_prefix
+					WHERE coalesce(properties @> ANY(filter), True)
+					AND NOT coalesce(properties @> ANY(unfilter), False)
+					AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+					AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
 					AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
 					ORDER BY cast_timestamp(properties->'published'->>0) ASC
 					LIMIT lim
@@ -303,10 +316,12 @@ BEGIN
 			) subq INTO items;
 		ELSE
 			SELECT json_agg(obj) FROM (
-				SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'deleted', deleted) AS obj
+				SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'acl', acl, 'deleted', deleted) AS obj
 				FROM objects
-				WHERE properties @> ANY(filter)
-				AND (properties->'url'->>0)::text LIKE uri_prefix
+				WHERE coalesce(properties @> ANY(filter), True)
+				AND NOT coalesce(properties @> ANY(unfilter), False)
+				AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+				AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
 				AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
 				AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
 				ORDER BY cast_timestamp(properties->'published'->>0) DESC
@@ -323,3 +338,35 @@ BEGIN
 	END CASE;
 END
 $$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION objects_smart_fetch(uri text, uri_prefix text, lim int, before timestamptz, after timestamptz, params jsonb) IS $$
+	Denormalizes an object if it's a normal entry or something, but:
+	If it's a 'feed configuration' object (type 'h-x-dynamic-feed'), turns it into an 'h-feed'
+	with matching objects from the same domain correctly paginated inside, without deleted / unauthorized posts.
+$$;
+
+CREATE FUNCTION objects_fetch_feeds(uri_prefix text) RETURNS jsonb AS $$
+	SELECT jsonb_agg(obj) FROM (
+		SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'acl', acl, 'deleted', deleted) AS obj
+		FROM objects
+		WHERE (properties->'url'->>0)::text LIKE uri_prefix || '%'
+		AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+		AND type @> '{h-x-dynamic-feed}'
+		AND deleted IS NOT True
+	) subq
+$$ LANGUAGE sql;
+COMMENT ON FUNCTION objects_fetch_feeds(uri_prefix text) IS $$
+	Fetches all 'h-x-dynamic-feed' objects on a given URI prefix (host), except deleted/unauthorized.
+$$;
+
+
+-------------------------------------------------------------------------------------------- Maintenance
+CREATE FUNCTION objects_rename_domain(old_uri_prefix text, new_uri_prefix text) RETURNS void AS $$
+	UPDATE objects
+	SET properties = jsonb_set(properties, '{url,0}'::text[], to_jsonb(replace(properties->'url'->>0, old_uri_prefix, new_uri_prefix)))
+	WHERE (properties->'url'->>0)::text LIKE old_uri_prefix || '%';
+	UPDATE objects
+	SET acl = array_replace(array_replace(acl, old_uri_prefix, new_uri_prefix), old_uri_prefix || '/', new_uri_prefix || '/');
+$$ LANGUAGE sql;
+COMMENT ON FUNCTION objects_rename_domain(old_uri_prefix text, new_uri_prefix text) IS $$
+	Change the URI prefix (scheme://domain) to move a website from one domain to another (or change its protocol to https, or something).
+$$;
