@@ -1,5 +1,6 @@
-DROP FUNCTION objects_rename_domain(old_uri_prefix text, new_uri_prefix text) CASCADE;
-DROP FUNCTION objects_fetch_feeds(uri_prefix text) CASCADE;
+DROP FUNCTION objects_rename_domain(text, text) CASCADE;
+DROP FUNCTION objects_fetch_categories(text) CASCADE;
+DROP FUNCTION objects_fetch_feeds(text) CASCADE;
 DROP FUNCTION objects_smart_fetch(text, text, int, timestamptz, timestamptz, jsonb) CASCADE;
 DROP FUNCTION substitute_params(jsonb, jsonb) CASCADE;
 DROP FUNCTION objects_normalized_upsert(jsonb) CASCADE;

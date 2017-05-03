@@ -358,6 +358,15 @@ COMMENT ON FUNCTION objects_fetch_feeds(uri_prefix text) IS $$
 	Fetches all 'h-x-dynamic-feed' objects on a given URI prefix (host), except deleted/unauthorized.
 $$;
 
+CREATE FUNCTION objects_fetch_categories(uri_prefix text) RETURNS jsonb AS $$
+	SELECT jsonb_agg(tag_rows) FROM (
+		SELECT DISTINCT jsonb_array_elements_text(properties->'category') AS name, count(*) AS obj_count FROM objects
+		WHERE (properties->'url'->>0)::text LIKE uri_prefix || '%'
+		AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+		GROUP BY name
+		ORDER BY obj_count DESC
+	) tag_rows
+$$ LANGUAGE sql;
 
 -------------------------------------------------------------------------------------------- Maintenance
 CREATE FUNCTION objects_rename_domain(old_uri_prefix text, new_uri_prefix text) RETURNS void AS $$
