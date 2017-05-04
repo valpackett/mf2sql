@@ -328,7 +328,7 @@ BEGIN
 				LIMIT lim
 			) subq INTO items;
 		END IF;
-		SELECT jsonb_set(jsonb_set(result, '{children}', coalesce(items, '[]')), '{type}', '["h-feed"]') INTO result;
+		SELECT jsonb_set(result, '{children}', coalesce(items, '[]')) INTO result;
 		RETURN result;
 	ELSE
 		SELECT jsonb_set(
