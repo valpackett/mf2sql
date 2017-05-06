@@ -26,7 +26,7 @@ end
 json_enc = PG::TextEncoder::JSON.new
 
 db.transaction do |tx|
-  stmt = tx.prepare('import', 'SELECT objects_normalized_upsert($1);')
+  stmt = tx.prepare('import', 'SELECT mf2.objects_normalized_upsert($1);')
   ARGV.each do |arg|
     data = parse(File.read(arg))
     tx.exec_prepared('import', [json_enc.encode(data)])
