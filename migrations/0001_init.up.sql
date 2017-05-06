@@ -303,29 +303,49 @@ BEGIN
 		IF before IS NULL AND after IS NOT NULL THEN
 			SELECT json_agg(obj) FROM (
 				SELECT obj FROM (
+					WITH stuff AS (
+						SELECT *
+						FROM objects
+						WHERE coalesce(properties @> ANY(filter), True)
+						AND NOT coalesce(properties @> ANY(unfilter), False)
+						AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+						AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
+						AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
+						-- Instead of using LIMIT here, we use dates to limit only the number of non-deleted objects
+						-- This could've been much easier if we didn't want tombstones
+					)
 					SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'acl', acl, 'deleted', deleted) AS obj
+					FROM stuff
+					WHERE coalesce(cast_timestamp(properties->'published'->>0) < (
+							SELECT cast_timestamp(properties->'published'->>0)
+							FROM stuff
+							WHERE deleted IS NOT True
+							ORDER BY cast_timestamp(properties->'published'->>0) ASC
+							OFFSET lim LIMIT 1 -- the way to get the *last* row lol
+					), True)
+				) subsubq ORDER BY cast_timestamp(obj->'properties'->'published'->>0) DESC
+			) subq INTO items;
+		ELSE
+			SELECT json_agg(obj) FROM (
+				WITH stuff AS (
+					SELECT *
 					FROM objects
 					WHERE coalesce(properties @> ANY(filter), True)
 					AND NOT coalesce(properties @> ANY(unfilter), False)
 					AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
 					AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
-					AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
-					ORDER BY cast_timestamp(properties->'published'->>0) ASC
-					LIMIT lim
-				) subsubq ORDER BY cast_timestamp(obj->'properties'->'published'->>0) DESC
-			) subq INTO items;
-		ELSE
-			SELECT json_agg(obj) FROM (
+					AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
+				)
 				SELECT jsonb_build_object('type', type, 'properties', objects_denormalize(properties, 4), 'children', children, 'acl', acl, 'deleted', deleted) AS obj
-				FROM objects
-				WHERE coalesce(properties @> ANY(filter), True)
-				AND NOT coalesce(properties @> ANY(unfilter), False)
-				AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
-				AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
-				AND coalesce(cast_timestamp(properties->'published'->>0) < before, True)
-				AND coalesce(cast_timestamp(properties->'published'->>0) > after, True)
+				FROM stuff
+				WHERE coalesce(cast_timestamp(properties->'published'->>0) > coalesce(after, (
+						SELECT cast_timestamp(properties->'published'->>0)
+						FROM stuff
+						WHERE deleted IS NOT True
+						ORDER BY cast_timestamp(properties->'published'->>0) DESC
+						OFFSET lim LIMIT 1 -- the way to get the *last* row lol
+				)), True)
 				ORDER BY cast_timestamp(properties->'published'->>0) DESC
-				LIMIT lim
 			) subq INTO items;
 		END IF;
 		SELECT jsonb_set(result, '{children}', coalesce(items, '[]')) INTO result;
