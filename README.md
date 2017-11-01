@@ -1,6 +1,6 @@
 # mf2sql [![unlicense](https://img.shields.io/badge/un-license-green.svg?style=flat)](http://unlicense.org)
 
-A PostgreSQL (9.6) schema for storing [microformats2](http://microformats.org/wiki/microformats2) objects (as the canonical JSON representation), featuring:
+A PostgreSQL (10) schema for storing [microformats2](http://microformats.org/wiki/microformats2) objects (as the canonical JSON representation), featuring:
 
 - Fast storage and querying ([jsonb](https://www.postgresql.org/docs/9.6/static/datatype-json.html) + [GIN](https://www.postgresql.org/docs/9.6/static/indexes-types.html))
 - Uniqueness constraint on the first `url` value

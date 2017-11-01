@@ -28,17 +28,25 @@ CREATE INDEX properties_idx ON mf2.objects USING GIN(properties jsonb_path_ops);
 -------------------------------------------------------------------------------------------- Full Text Search
 CREATE INDEX tsv_idx ON mf2.objects USING GIST(tsv);
 
+CREATE FUNCTION mf2.jsonb_values(data jsonb) RETURNS SETOF jsonb AS $$
+BEGIN
+	IF jsonb_typeof(jsonlevel) = 'object' THEN
+		RETURN QUERY SELECT (jsonb_each(jsonlevel)).value;
+	ELSIF jsonb_typeof(jsonlevel) = 'array' THEN
+		RETURN QUERY SELECT jsonb_array_elements(jsonlevel);
+	ELSE
+		RETURN QUERY SELECT true WHERE false;
+	END IF;
+END
+$$ LANGUAGE plpgsql IMMUTABLE;
+
 CREATE FUNCTION mf2.flatten_jsonb(data jsonb) RETURNS SETOF jsonb AS $$
 	-- based on https://stackoverflow.com/a/27742278/239140
 	-- modified to use jsonb_typeof
 	WITH RECURSIVE deconstruct (jsonlevel) AS (
 		VALUES (data)
 		UNION ALL
-		SELECT
-			CASE jsonb_typeof(jsonlevel)
-			WHEN 'object' THEN (jsonb_each(jsonlevel)).value
-			WHEN 'array' THEN jsonb_array_elements(jsonlevel)
-			END AS jsonlevel
+		SELECT mf2.jsonb_values(jsonlevel) AS jsonlevel
 		FROM deconstruct
 		WHERE jsonb_typeof(jsonlevel) IN ('object', 'array')
 	) SELECT * FROM deconstruct;
