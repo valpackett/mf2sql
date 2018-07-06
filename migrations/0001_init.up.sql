@@ -20,8 +20,8 @@ EXCEPTION WHEN others THEN RETURN NULL;
 END
 $$ LANGUAGE plpgsql IMMUTABLE;
 
-CREATE UNIQUE INDEX url_idx ON mf2.objects ((properties->'url'->>0));
-CREATE INDEX pub_time_idx ON mf2.objects (mf2.cast_timestamp(properties->'published'->>0));
+CREATE UNIQUE INDEX url_idx ON mf2.objects ((properties->'url'->>0) text_pattern_ops);
+CREATE INDEX pub_time_idx ON mf2.objects (mf2.cast_timestamp(properties->'published'->>0) DESC);
 CREATE INDEX properties_idx ON mf2.objects USING GIN(properties jsonb_path_ops);
 
 
@@ -154,7 +154,6 @@ CREATE FUNCTION mf2.objects_denormalize(data jsonb, lvl int) RETURNS jsonb AS $$
 BEGIN
 	IF (SELECT to_regclass('_objects_denormalize_temp')) IS NULL THEN
 		CREATE TEMPORARY TABLE _objects_denormalize_temp (url text);
-		CREATE INDEX ON _objects_denormalize_temp (url);
 	ELSE
 		TRUNCATE TABLE _objects_denormalize_temp;
 	END IF;
@@ -305,7 +304,7 @@ DECLARE
 BEGIN
 	SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'acl', acl, 'deleted', deleted)
 	FROM mf2.objects INTO result
-	WHERE trim(both from properties->'url'->>0, '"') = uri;
+	WHERE properties->'url'->>0 = uri;
 	CASE
 	WHEN result->'type' @> '"h-x-dynamic-feed"' THEN
 		-- NOTE: putting the filter code inside of the ANY() causes the planner to use seq scan, but only if it has mf2.substitute_params
@@ -319,7 +318,7 @@ BEGIN
 						FROM mf2.objects
 						WHERE coalesce(properties @> ANY(filter), True)
 						AND NOT coalesce(properties @> ANY(unfilter), False)
-						AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+						AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
 						AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
 						AND coalesce(mf2.cast_timestamp(properties->'published'->>0) > after, True)
 						-- Instead of using LIMIT here, we use dates to limit only the number of non-deleted objects
@@ -343,7 +342,7 @@ BEGIN
 					FROM mf2.objects
 					WHERE coalesce(properties @> ANY(filter), True)
 					AND NOT coalesce(properties @> ANY(unfilter), False)
-					AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+					AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
 					AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
 					AND coalesce(mf2.cast_timestamp(properties->'published'->>0) < before, True)
 				)
@@ -380,7 +379,7 @@ CREATE FUNCTION mf2.objects_fetch_feeds(uri_prefix text) RETURNS jsonb AS $$
 		SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'acl', acl, 'deleted', deleted) AS obj
 		FROM mf2.objects
 		WHERE (properties->'url'->>0)::text LIKE uri_prefix || '%'
-		AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+		AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
 		AND type @> '{h-x-dynamic-feed}'
 		AND deleted IS NOT True
 	) subq
@@ -394,7 +393,7 @@ CREATE FUNCTION mf2.objects_fetch_categories(uri_prefix text) RETURNS jsonb AS $
 		SELECT DISTINCT jsonb_array_elements_text(properties->'category') AS name, count(*) AS obj_count
 		FROM mf2.objects
 		WHERE (properties->'url'->>0)::text LIKE uri_prefix || '%'
-		AND ('*' = ANY(acl) OR current_setting('mf2sql.current_user_url', true) = ANY(acl) OR current_setting('mf2sql.current_user_url', true) || '/' = ANY(acl))
+		AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
 		GROUP BY name
 		ORDER BY obj_count DESC
 	) tag_rows
