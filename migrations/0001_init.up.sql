@@ -80,11 +80,11 @@ CREATE FUNCTION mf2.objects_notify() RETURNS trigger AS $$
 BEGIN
 	CASE TG_OP
 		WHEN 'INSERT' THEN PERFORM pg_notify('mf2_objects',
-			json_build_object('op', 'insert', 'url', NEW.properties->'url')::text);
+			json_build_object('op', 'insert', 'url', ARRAY[substring(NEW.properties->'url'->>0 for 3000)])::text);
 		WHEN 'UPDATE' THEN PERFORM pg_notify('mf2_objects',
-			json_build_object('op', 'update', 'url', NEW.properties->'url')::text);
+			json_build_object('op', 'update', 'url', ARRAY[substring(NEW.properties->'url'->>0 for 3000)])::text);
 		WHEN 'DELETE' THEN PERFORM pg_notify('mf2_objects',
-			json_build_object('op', 'delete', 'url', OLD.properties->'url')::text);
+			json_build_object('op', 'delete', 'url', ARRAY[substring(OLD.properties->'url'->>0 for 3000)])::text);
 	END CASE;
 	RETURN NULL;
 END
