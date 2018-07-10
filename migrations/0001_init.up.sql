@@ -124,8 +124,8 @@ BEGIN
 		RETURN data;
 	WHEN 'object' THEN
 		INSERT INTO _objects_denormalize_temp
-		SELECT jsonb_array_elements_text(data->'url')
-		UNION ALL SELECT jsonb_array_elements_text(data->'uid');
+		SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(data->'url') = 'array' THEN data->'url' ELSE '[]'::jsonb END)
+		UNION ALL SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(data->'uid') = 'array' THEN data->'uid' ELSE '[]'::jsonb END);
 		RETURN (
 			SELECT
 				jsonb_object_agg(key, CASE
@@ -302,14 +302,23 @@ CREATE FUNCTION mf2.objects_smart_fetch(uri text, uri_prefix text, lim int, befo
 DECLARE
 	filter jsonb[];
 	unfilter jsonb[];
+	chanurls text[];
+	ischan bool := False;
 	result jsonb;
 	items jsonb;
 BEGIN
 	SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'acl', acl, 'deleted', deleted)
 	FROM mf2.objects INTO result
 	WHERE properties->'url'->>0 = uri;
+	IF result->'type' @> '"h-x-reader-channel"' THEN
+		SELECT array_agg(url) FROM
+			(SELECT DISTINCT jsonb_array_elements_text(coalesce(sub->'entries', '[]'::jsonb)) url
+			FROM jsonb_array_elements(result->'properties'->'subscriptions') sub) AS urls
+		INTO chanurls;
+		SELECT True INTO ischan; -- not duplicating the @> in case the optimizer is not smart enough
+	END IF;
 	CASE
-	WHEN result->'type' @> '"h-x-dynamic-feed"' THEN
+	WHEN result->'type' @> '"h-x-dynamic-feed"' OR result->'type' @> '"h-x-reader-channel"' THEN
 		-- NOTE: putting the filter code inside of the ANY() causes the planner to use seq scan, but only if it has mf2.substitute_params
 		SELECT mf2.jsonb_array_to_pg_array(mf2.substitute_params(result->'properties'->'filter', params)) INTO filter;
 		SELECT mf2.jsonb_array_to_pg_array(mf2.substitute_params(result->'properties'->'unfilter', params)) INTO unfilter;
@@ -321,8 +330,9 @@ BEGIN
 						FROM mf2.objects
 						WHERE coalesce(properties @> ANY(filter), True)
 						AND NOT coalesce(properties @> ANY(unfilter), False)
-						AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
-						AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
+						AND (acl && ARRAY['*', rtrim(current_setting('mf2sql.current_user_url', true), '/'), rtrim(current_setting('mf2sql.current_user_url', true), '/') || '/'])
+						AND (CASE WHEN ischan THEN chanurls @> ARRAY[(properties->'url'->>0)::text]
+							ELSE (properties->'url'->>0)::text LIKE uri_prefix || '%' END)
 						AND coalesce(mf2.cast_timestamp(properties->'published'->>0) > after, True)
 						-- Instead of using LIMIT here, we use dates to limit only the number of non-deleted objects
 						-- This could've been much easier if we didn't want tombstones
@@ -345,8 +355,9 @@ BEGIN
 					FROM mf2.objects
 					WHERE coalesce(properties @> ANY(filter), True)
 					AND NOT coalesce(properties @> ANY(unfilter), False)
-					AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
-					AND (properties->'url'->>0)::text LIKE uri_prefix || '%'
+					AND (acl && ARRAY['*', rtrim(current_setting('mf2sql.current_user_url', true), '/'), rtrim(current_setting('mf2sql.current_user_url', true), '/') || '/'])
+					AND (CASE WHEN ischan THEN chanurls @> ARRAY[(properties->'url'->>0)::text]
+						ELSE (properties->'url'->>0)::text LIKE uri_prefix || '%' END)
 					AND coalesce(mf2.cast_timestamp(properties->'published'->>0) < before, True)
 				)
 				SELECT jsonb_build_object('type', type, 'properties', mf2.objects_denormalize(properties, 4), 'children', children, 'acl', acl, 'deleted', deleted) AS obj
@@ -382,21 +393,24 @@ CREATE FUNCTION mf2.objects_fetch_feeds(uri_prefix text) RETURNS jsonb AS $$
 		SELECT jsonb_build_object('type', type, 'properties', properties, 'children', children, 'acl', acl, 'deleted', deleted) AS obj
 		FROM mf2.objects
 		WHERE (properties->'url'->>0)::text LIKE uri_prefix || '%'
-		AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
-		AND type @> '{h-x-dynamic-feed}'
+		AND (acl && ARRAY['*', rtrim(current_setting('mf2sql.current_user_url', true), '/'), rtrim(current_setting('mf2sql.current_user_url', true), '/') || '/'])
+		AND (type @> '{h-x-dynamic-feed}' OR type @> '{h-x-reader-channel}')
 		AND deleted IS NOT True
 	) subq
 $$ LANGUAGE sql;
 COMMENT ON FUNCTION mf2.objects_fetch_feeds(uri_prefix text) IS $$
-	Fetches all 'h-x-dynamic-feed' objects on a given URI prefix (host), except deleted/unauthorized.
+	Fetches all 'h-x-dynamic-feed' and 'h-x-reader-channel' objects on a given URI prefix (host), except deleted/unauthorized.
 $$;
 
 CREATE FUNCTION mf2.objects_fetch_categories(uri_prefix text) RETURNS jsonb AS $$
 	SELECT jsonb_agg(tag_rows) FROM (
-		SELECT DISTINCT jsonb_array_elements_text(properties->'category') AS name, count(*) AS obj_count
+		SELECT DISTINCT
+			jsonb_array_elements_text(CASE WHEN jsonb_typeof(properties->'category') = 'array'
+				THEN properties->'category' ELSE '[]'::jsonb END) AS name,
+			count(*) AS obj_count
 		FROM mf2.objects
 		WHERE (properties->'url'->>0)::text LIKE uri_prefix || '%'
-		AND (acl && ARRAY['*', current_setting('mf2sql.current_user_url', true), current_setting('mf2sql.current_user_url', true) || '/'])
+		AND (acl && ARRAY['*', rtrim(current_setting('mf2sql.current_user_url', true), '/'), rtrim(current_setting('mf2sql.current_user_url', true), '/') || '/'])
 		GROUP BY name
 		ORDER BY obj_count DESC
 	) tag_rows
