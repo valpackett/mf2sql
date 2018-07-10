@@ -258,17 +258,20 @@ CREATE FUNCTION mf2.jsonb_array_to_pg_array_of_text(data jsonb) RETURNS text[] A
 $$ LANGUAGE sql IMMUTABLE;
 
 CREATE FUNCTION mf2.objects_normalized_upsert(data jsonb) RETURNS void AS $$
-	INSERT INTO mf2.objects (type, properties, children)
+	INSERT INTO mf2.objects (type, properties, children, acl)
 	SELECT
 		-- distinct because upsert (ON CONFLICT UPDATE) doesn't support affecting one row twice
 		DISTINCT ON ((objects_normalize->'properties'->'url'->>0))
 		(SELECT mf2.jsonb_array_to_pg_array_of_text(objects_normalize->'type')),
 		objects_normalize->'properties',
-		(SELECT mf2.jsonb_array_to_pg_array(objects_normalize->'children'))
+		(SELECT mf2.jsonb_array_to_pg_array(objects_normalize->'children')),
+		(CASE WHEN jsonb_typeof(objects_normalize->'acl') = 'array'
+			THEN (SELECT array_agg(x) FROM (SELECT jsonb_array_elements_text(objects_normalize->'acl') x) x)
+			ELSE '{*}' END)
 	FROM mf2.objects_normalize(data)
 	WHERE (objects_normalize->'properties'->'url'->>0) IS NOT NULL
 	ON CONFLICT ((properties->'url'->>0))
-	DO UPDATE SET type = EXCLUDED.type, properties = EXCLUDED.properties, children = EXCLUDED.children;
+	DO UPDATE SET type = EXCLUDED.type, properties = EXCLUDED.properties, children = EXCLUDED.children, acl = EXCLUDED.acl;
 $$ LANGUAGE sql;
 COMMENT ON FUNCTION mf2.objects_normalized_upsert(data jsonb) IS $$
 	Upserts and object and its embedded objects after flattening the hierarchy.
