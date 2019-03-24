@@ -14,7 +14,8 @@ A PostgreSQL (10) schema for storing [microformats2](http://microformats.org/wik
 
 - Create a database e.g. `sudo -u postgres createdb mywebsite`
 - Run `SELECT current_setting('default_text_search_config');` to check if your default language for full text search matches your website's (if not, change that setting)
-- Run the migrations using [migrate](https://github.com/golang-migrate/migrate) e.g. `migrate -path=migrations -url=postgres://localhost/mywebsite\?sslmode=disable up` (or just run the `migrations/*.up.sql` files with `psql` if you don't want to bother with `migrate`)
+- Run the migrations using [migrate](https://github.com/golang-migrate/migrate) e.g. `migrate -path=migrations -url=postgres://localhost/mywebsite\?sslmode=disable up` (or just run the `migrations/*.up.sql` files with `psql` if you don't want to bother with `migrate`) (so far there's only one migration)
+- Install the functions by running `psql` on `functions/*.sql`
 - Import JSON files using `import.rb` if you want
 
 ## Development
